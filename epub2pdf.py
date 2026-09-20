@@ -327,12 +327,14 @@ def parse_opf(opf_path: Path) -> tuple[dict, list[Path]]:
     manifest: dict[str, Path] = {}
     css_paths: list[Path] = []
     for item in tree.findall(".//opf:item", ns):
-        iid = item.get("id", "")
+        iid  = item.get("id", "")
         href = item.get("href", "")
         mt   = item.get("media-type", "")
-        if href and ("html" in mt or "xhtml" in mt):
+        if not href:
+            continue
+        if "html" in mt or "xhtml" in mt:
             manifest[iid] = opf_dir / unquote(href)
-        elif href and mt == "text/css":
+        elif mt == "text/css":
             p = opf_dir / unquote(href)
             if p.exists():
                 css_paths.append(p)
@@ -656,6 +658,102 @@ def render_pdf(html_path: Path, pdf_path: Path, title: str = "") -> None:
         browser.close()
 
 
+def get_spine_item_image(html_path: Path) -> Path | None:
+    """If this spine item has exactly one image and no body text, return the image path.
+
+    Handles both standard <img src="..."> and Calibre's SVG pattern:
+    <svg><image xlink:href="..."/></svg>.
+    """
+    from bs4 import BeautifulSoup
+    try:
+        soup = BeautifulSoup(html_path.read_text(encoding="utf-8", errors="replace"), "lxml")
+    except Exception:
+        return None
+    body = soup.find("body") or soup
+    if body.get_text(strip=True):
+        return None
+
+    srcs = [img.get("src", "") for img in body.find_all("img") if img.get("src")]
+    # SVG <image> used by Calibre; lxml HTML parser keeps "xlink:href" as a literal attr name
+    for svg_img in body.find_all("image"):
+        href = svg_img.get("xlink:href") or svg_img.get("href") or ""
+        if href:
+            srcs.append(href)
+
+    if len(srcs) != 1:
+        return None
+    try:
+        return (html_path.parent / unquote(srcs[0])).resolve()
+    except Exception:
+        return None
+
+
+def segment_spine(spine: list[Path]) -> list[tuple[str, list]]:
+    """Split spine into ('fullbleed', [image_path, ...]) or ('content', [html_path, ...]) segments.
+
+    Consecutive image-only items are grouped together; consecutive text items likewise.
+    This allows full-bleed rendering of cover/title pages and section-break images anywhere
+    in the spine, not just at the front.
+    """
+    classified: list[tuple[str, object]] = []
+    for p in spine:
+        img = get_spine_item_image(p)
+        if img is not None and img.exists():
+            classified.append(("fullbleed", img))
+        else:
+            classified.append(("content", p))
+
+    segments: list[tuple[str, list]] = []
+    for kind, item in classified:
+        if segments and segments[-1][0] == kind:
+            segments[-1][1].append(item)
+        else:
+            segments.append((kind, [item]))
+    return segments
+
+
+def render_fullbleed_pdf(image: Path, pdf_path: Path) -> None:
+    """Render a single image as a full-bleed, margin-free, header-free PDF page."""
+    from playwright.sync_api import sync_playwright
+
+    html = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>*{margin:0;padding:0;box-sizing:border-box}"
+        "html,body{width:100%;height:100%;overflow:hidden}"
+        "img{width:100%;height:100%;object-fit:cover;display:block}"
+        "</style></head><body>"
+        f"<img src='{image.as_uri()}'>"
+        "</body></html>"
+    )
+    tmp_html = pdf_path.parent / f"_{pdf_path.stem}.html"
+    tmp_html.write_text(html, encoding="utf-8")
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        page.goto(tmp_html.as_uri(), wait_until="networkidle")
+        page.pdf(
+            path=str(pdf_path),
+            width=PAGE_WIDTH,
+            height=PAGE_HEIGHT,
+            print_background=True,
+            display_header_footer=False,
+            margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+        )
+        browser.close()
+
+
+def merge_pdfs(pdf_paths: list[Path], output: Path) -> None:
+    from pypdf import PdfWriter, PdfReader
+    writer = PdfWriter()
+    for p in pdf_paths:
+        reader = PdfReader(str(p))
+        for page in reader.pages:
+            writer.add_page(page)
+    with open(output, "wb") as f:
+        writer.write(f)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Convert EPUB to PDF for tablet reading.")
     ap.add_argument("epub",   type=Path, help="Input .epub file")
@@ -710,9 +808,15 @@ def main() -> None:
             print(f"  Author  : {meta['creator']}")
         print(f"  Chapters: {len(spine)}")
 
+        segments = segment_spine(spine)
+        n_fullbleed = sum(len(items) for kind, items in segments if kind == "fullbleed")
+        content_items = [p for kind, items in segments if kind == "content" for p in items]
+        if n_fullbleed:
+            print(f"  Full-bleed pages: {n_fullbleed}")
+
         cv_sizes: dict[Path, str | None] | None = None
         if use_cv or use_sr:
-            image_paths = collect_image_paths(spine)
+            image_paths = collect_image_paths(content_items)
             print(f"Found {len(image_paths)} unique images")
 
             formula_originals: dict[Path, tuple[int, int]] = {}
@@ -731,25 +835,40 @@ def main() -> None:
         if heading_map:
             print(f"  Heading classes: {', '.join(sorted(heading_map))}")
 
-        print("Building merged HTML …")
-        chapters = [
-            chapter_body(p, cv_sizes=cv_sizes,
-                         new_chapter=has_chapter_heading(p, heading_map),
-                         heading_map=heading_map)
-            for p in spine
-        ]
-        html = HTML_TEMPLATE.format(
-            lang=meta.get("language", "en"),
-            title=meta.get("title", epub_path.stem),
-            css=PAGE_CSS,
-            body="\n".join(chapters),
-        )
-
-        html_file = tmp / "_merged.html"
-        html_file.write_text(html, encoding="utf-8")
+        title = meta.get("title", epub_path.stem)
+        lang  = meta.get("language", "en")
 
         print("Rendering PDF via Chromium …")
-        render_pdf(html_file, pdf_path, title=meta.get("title", epub_path.stem))
+        seg_pdfs: list[Path] = []
+        for seg_idx, (kind, items) in enumerate(segments):
+            fp = tmp / f"_seg{seg_idx}.pdf"
+            if kind == "fullbleed":
+                for img_idx, img in enumerate(items):
+                    img_fp = tmp / f"_seg{seg_idx}_{img_idx}.pdf"
+                    print(f"  Full-bleed: {img.name}")
+                    render_fullbleed_pdf(img, img_fp)
+                    seg_pdfs.append(img_fp)
+            else:
+                print(f"Building HTML for content segment {seg_idx} …")
+                chapters = [
+                    chapter_body(p, cv_sizes=cv_sizes,
+                                 new_chapter=has_chapter_heading(p, heading_map),
+                                 heading_map=heading_map)
+                    for p in items
+                ]
+                html = HTML_TEMPLATE.format(lang=lang, title=title, css=PAGE_CSS,
+                                            body="\n".join(chapters))
+                html_file = tmp / f"_seg{seg_idx}.html"
+                html_file.write_text(html, encoding="utf-8")
+                render_pdf(html_file, fp, title=title)
+                seg_pdfs.append(fp)
+
+        if len(seg_pdfs) == 1:
+            import shutil
+            shutil.copy2(str(seg_pdfs[0]), str(pdf_path))
+        else:
+            print("  Merging segments …")
+            merge_pdfs(seg_pdfs, pdf_path)
 
     print(f"\nDone → {pdf_path}")
 
