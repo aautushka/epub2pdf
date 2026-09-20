@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 epub2pdf — Convert EPUB to a beautifully formatted PDF for iPad Pro.
-Usage: python epub2pdf.py input.epub [output.pdf]
+Usage: python epub2pdf.py input.epub [output.pdf] [--no-cv]
 """
 
 import argparse
@@ -9,13 +9,15 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
 
 # ── iPad Pro 12.9" portrait dimensions ──────────────────────────────────────
-PAGE_WIDTH  = "7.76in"
-PAGE_HEIGHT = "10.34in"
+PAGE_WIDTH       = "7.76in"
+PAGE_HEIGHT      = "10.34in"
+CONTENT_WIDTH_IN = 7.76 - 2 * 0.70   # usable width after margins = 6.36in
+TARGET_LABEL_PT  = 8.0                # chart/diagram labels should render at ~8pt
 
 PAGE_CSS = r"""
 /* Reset */
@@ -69,14 +71,14 @@ a { color: inherit; text-decoration: none; }
 
 /* Images */
 img {
-  max-width: 90% !important;
-  max-height: 4in !important;
-  width: auto !important;
-  height: auto !important;
+  max-width: 100%;
+  height: auto;
   display: block;
   margin: 1em auto;
   page-break-inside: avoid;
 }
+/* Fallback cap for images not sized by CV */
+img:not([style]) { max-height: 4in; }
 figure { page-break-inside: avoid; margin: 1.2em 0; text-align: center; }
 figcaption { font-size: 0.84em; color: #555; font-style: italic; margin-top: 0.3em; }
 
@@ -158,7 +160,8 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def check_deps() -> None:
+def check_deps(use_cv: bool) -> bool:
+    """Check required deps; return whether CV is actually available."""
     missing = []
     try:
         import bs4  # noqa: F401
@@ -173,6 +176,25 @@ def check_deps() -> None:
             f"Missing packages: pip install {' '.join(missing)}\n"
             "Also run: playwright install chromium"
         )
+
+    if not use_cv:
+        return False
+
+    cv_ok = True
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        print("warning: Pillow not installed — CV sizing disabled (pip install Pillow)", file=sys.stderr)
+        cv_ok = False
+    if cv_ok:
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+        except Exception:
+            print("warning: pytesseract/Tesseract not available — CV sizing disabled\n"
+                  "         pip install pytesseract  &&  brew install tesseract", file=sys.stderr)
+            cv_ok = False
+    return cv_ok
 
 
 def extract_epub(epub_path: Path, dest: Path) -> None:
@@ -222,7 +244,70 @@ def parse_opf(opf_path: Path) -> tuple[dict, list[Path]]:
     return meta, spine
 
 
-def chapter_body(html_path: Path) -> str:
+def cv_image_width(img_path: Path) -> str | None:
+    """OCR one image; return CSS width string scaled so labels read at TARGET_LABEL_PT, or None."""
+    try:
+        from PIL import Image
+        import pytesseract
+
+        img = Image.open(img_path).convert("RGB")
+        W, H = img.size
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+        heights = [
+            h for h, conf, text in zip(data["height"], data["conf"], data["text"])
+            if isinstance(conf, (int, float)) and conf > 40
+            and isinstance(text, str) and text.strip()
+            and h > 5
+        ]
+        if not heights:
+            return None
+
+        heights.sort()
+        char_h_px = heights[len(heights) // 2]   # median detected text height
+
+        # Scale so char_h_px → TARGET_LABEL_PT on the printed page
+        target_w = (W / char_h_px) * (TARGET_LABEL_PT / 72)
+        target_w = min(target_w, CONTENT_WIDTH_IN * 0.95)
+        target_w = max(target_w, 0.8)             # never tinier than 0.8in
+        return f"{target_w:.3f}in"
+    except Exception:
+        return None
+
+
+def collect_image_paths(spine: list[Path]) -> list[Path]:
+    """Return all unique image paths referenced in spine HTML files, in order."""
+    from bs4 import BeautifulSoup
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for html_path in spine:
+        try:
+            soup = BeautifulSoup(html_path.read_bytes(), "lxml")
+            for tag in soup.find_all("img"):
+                src = tag.get("src", "")
+                if src and not src.startswith(("http://", "https://", "data:")):
+                    resolved = (html_path.parent / unquote(src)).resolve()
+                    if resolved.exists() and resolved not in seen:
+                        seen.add(resolved)
+                        result.append(resolved)
+        except Exception:
+            pass
+    return result
+
+
+def run_ocr(image_paths: list[Path]) -> dict[Path, str | None]:
+    """OCR every image and return {path: css_width_or_None}."""
+    sizes: dict[Path, str | None] = {}
+    n = len(image_paths)
+    for i, p in enumerate(image_paths, 1):
+        print(f"  OCR {i}/{n}: {p.name:<40}", end="\r", flush=True)
+        sizes[p] = cv_image_width(p)
+    if n:
+        print()
+    return sizes
+
+
+def chapter_body(html_path: Path, cv_sizes: dict[Path, str | None] | None = None) -> str:
     """Return the inner body content of a chapter with absolute image paths."""
     from bs4 import BeautifulSoup
 
@@ -256,6 +341,16 @@ def chapter_body(html_path: Path) -> str:
         tag.attrs.pop("width", None)
         tag.attrs.pop("height", None)
 
+    # Apply CV-computed widths as inline styles (after all stripping)
+    if cv_sizes:
+        for tag in soup.find_all("img"):
+            src = tag.get("src", "")
+            if src.startswith("file://"):
+                img_path = Path(unquote(urlparse(src).path))
+                w = cv_sizes.get(img_path)
+                if w:
+                    tag["style"] = f"width: {w}; height: auto;"
+
     body = soup.find("body")
     if body:
         return f'<div class="chapter">\n{body.decode_contents()}\n</div>'
@@ -281,12 +376,14 @@ def render_pdf(html_path: Path, pdf_path: Path) -> None:
 
 
 def main() -> None:
-    check_deps()
-
     ap = argparse.ArgumentParser(description="Convert EPUB to PDF for iPad Pro.")
     ap.add_argument("epub",   type=Path, help="Input .epub file")
     ap.add_argument("output", type=Path, nargs="?", help="Output .pdf (default: same stem as input)")
+    ap.add_argument("--no-cv", action="store_false", dest="use_cv",
+                    help="Disable OCR-based image sizing (faster, uses fixed max-height fallback)")
     args = ap.parse_args()
+
+    use_cv: bool = check_deps(args.use_cv)
 
     epub_path: Path = args.epub.resolve()
     if not epub_path.exists():
@@ -314,8 +411,18 @@ def main() -> None:
             print(f"  Author  : {meta['creator']}")
         print(f"  Chapters: {len(spine)}")
 
+        cv_sizes: dict[Path, str | None] | None = None
+        if use_cv:
+            print("OCR-sizing images …")
+            image_paths = collect_image_paths(spine)
+            print(f"  Found {len(image_paths)} unique images")
+            if image_paths:
+                cv_sizes = run_ocr(image_paths)
+                sized = sum(1 for v in cv_sizes.values() if v)
+                print(f"  Sized {sized}/{len(image_paths)} via OCR ({len(image_paths)-sized} fallback)")
+
         print("Building merged HTML …")
-        chapters = [chapter_body(p) for p in spine]
+        chapters = [chapter_body(p, cv_sizes=cv_sizes) for p in spine]
         html = HTML_TEMPLATE.format(
             lang=meta.get("language", "en"),
             title=meta.get("title", epub_path.stem),
