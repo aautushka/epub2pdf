@@ -39,10 +39,6 @@ body {
   widows: 3;
 }
 
-/* Chapter breaks */
-div.chapter { page-break-before: always; }
-div.chapter:first-of-type { page-break-before: avoid; }
-
 /* Headings */
 h1, h2, h3, h4, h5, h6 {
   font-family: Georgia, serif;
@@ -50,14 +46,13 @@ h1, h2, h3, h4, h5, h6 {
   line-height: 1.25;
   margin: 1.4em 0 0.45em;
   page-break-after: avoid;
+  page-break-inside: avoid;
 }
 h1 {
   font-size: 1.85em;
   padding-bottom: 0.18em;
   border-bottom: 1.5px solid #ccc;
-  page-break-before: always;
 }
-div.chapter:first-of-type h1:first-child { page-break-before: avoid; }
 h2 { font-size: 1.35em; }
 h3 { font-size: 1.12em; }
 h4 { font-size: 1em; font-style: italic; }
