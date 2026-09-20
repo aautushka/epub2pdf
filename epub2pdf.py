@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 epub2pdf — Convert EPUB to a beautifully formatted PDF for iPad Pro.
-Usage: python epub2pdf.py input.epub [output.pdf] [--no-cv]
+Usage: python epub2pdf.py input.epub [output.pdf] [--no-cv] [--no-sr]
 """
 
 import argparse
@@ -16,8 +16,12 @@ from xml.etree import ElementTree as ET
 # ── iPad Pro 12.9" portrait dimensions ──────────────────────────────────────
 PAGE_WIDTH       = "7.76in"
 PAGE_HEIGHT      = "10.34in"
-CONTENT_WIDTH_IN = 7.76 - 2 * 0.70   # usable width after margins = 6.36in
-TARGET_LABEL_PT  = 8.0                # chart/diagram labels should render at ~8pt
+CONTENT_WIDTH_IN  = 7.76 - 2 * 0.70   # usable width after margins = 6.36in
+TARGET_LABEL_PT   = 8.0               # chart/diagram labels should render at ~8pt
+SR_MAX_HEIGHT_PX  = 250               # images shorter than this are formula candidates
+SR_MAX_SAT_STD    = 0.05              # saturation std below this → near-grayscale
+SR_SCALE          = 4                 # upscale factor for formula images
+FORMULA_DPI       = 200               # assumed DPI for sizing formula images by original height
 
 PAGE_CSS = r"""
 /* Reset */
@@ -160,8 +164,8 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def check_deps(use_cv: bool) -> bool:
-    """Check required deps; return whether CV is actually available."""
+def check_deps(use_cv: bool, use_sr: bool) -> tuple[bool, bool]:
+    """Check deps; return (cv_available, sr_available)."""
     missing = []
     try:
         import bs4  # noqa: F401
@@ -177,24 +181,35 @@ def check_deps(use_cv: bool) -> bool:
             "Also run: playwright install chromium"
         )
 
-    if not use_cv:
-        return False
+    # Pillow + numpy are shared by both CV and SR
+    pil_ok = True
+    if use_cv or use_sr:
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            print("warning: Pillow not installed — CV/SR disabled (pip install Pillow)", file=sys.stderr)
+            pil_ok = False
 
-    cv_ok = True
-    try:
-        import PIL  # noqa: F401
-    except ImportError:
-        print("warning: Pillow not installed — CV sizing disabled (pip install Pillow)", file=sys.stderr)
-        cv_ok = False
-    if cv_ok:
+    numpy_ok = True
+    if use_sr and pil_ok:
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            print("warning: numpy not installed — SR disabled (pip install numpy)", file=sys.stderr)
+            numpy_ok = False
+
+    cv_ok = False
+    if use_cv and pil_ok:
         try:
             import pytesseract
             pytesseract.get_tesseract_version()
+            cv_ok = True
         except Exception:
             print("warning: pytesseract/Tesseract not available — CV sizing disabled\n"
                   "         pip install pytesseract  &&  brew install tesseract", file=sys.stderr)
-            cv_ok = False
-    return cv_ok
+
+    sr_ok = use_sr and pil_ok and numpy_ok
+    return cv_ok, sr_ok
 
 
 def extract_epub(epub_path: Path, dest: Path) -> None:
@@ -275,6 +290,44 @@ def cv_image_width(img_path: Path) -> str | None:
         return None
 
 
+def is_formula_image(img: "Image.Image") -> bool:  # type: ignore[name-defined]
+    """Return True if image looks like an inline formula: small AND near-grayscale."""
+    import numpy as np
+    _, h = img.size
+    if h > SR_MAX_HEIGHT_PX:
+        return False
+    rgb = np.array(img.convert("RGB"), dtype=np.float32)
+    max_c = rgb.max(axis=2)
+    min_c = rgb.min(axis=2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sat = np.where(max_c > 0, (max_c - min_c) / max_c, 0.0)
+    return float(sat.std()) < SR_MAX_SAT_STD
+
+
+def upscale_formulas(image_paths: list[Path]) -> dict[Path, tuple[int, int]]:
+    """Upscale formula images in-place (Lanczos ×SR_SCALE).
+    Returns {path: (original_W, original_H)} for every image that was upscaled."""
+    from PIL import Image
+    originals: dict[Path, tuple[int, int]] = {}
+    n = len(image_paths)
+    for i, p in enumerate(image_paths, 1):
+        print(f"  SR  {i}/{n}: {p.name:<40}", end="\r", flush=True)
+        try:
+            img = Image.open(p)
+            if is_formula_image(img):
+                w, h = img.size
+                originals[p] = (w, h)
+                upscaled = img.convert("L").resize(
+                    (w * SR_SCALE, h * SR_SCALE), Image.LANCZOS
+                )
+                upscaled.save(p)
+        except Exception:
+            pass
+    if n:
+        print()
+    return originals
+
+
 def collect_image_paths(spine: list[Path]) -> list[Path]:
     """Return all unique image paths referenced in spine HTML files, in order."""
     from bs4 import BeautifulSoup
@@ -295,13 +348,24 @@ def collect_image_paths(spine: list[Path]) -> list[Path]:
     return result
 
 
-def run_ocr(image_paths: list[Path]) -> dict[Path, str | None]:
-    """OCR every image and return {path: css_width_or_None}."""
+def run_ocr(
+    image_paths: list[Path],
+    formula_originals: dict[Path, tuple[int, int]] | None = None,
+) -> dict[Path, str | None]:
+    """Compute CSS widths for all images; formula images use DPI-based sizing, others use OCR."""
     sizes: dict[Path, str | None] = {}
     n = len(image_paths)
     for i, p in enumerate(image_paths, 1):
         print(f"  OCR {i}/{n}: {p.name:<40}", end="\r", flush=True)
-        sizes[p] = cv_image_width(p)
+        if formula_originals and p in formula_originals:
+            orig_w, orig_h = formula_originals[p]
+            h_in = orig_h / FORMULA_DPI
+            w_in = orig_w / FORMULA_DPI
+            h_in = min(max(h_in, 0.15), 0.8)
+            w_in = min(w_in * (h_in / (orig_h / FORMULA_DPI)), CONTENT_WIDTH_IN * 0.6)
+            sizes[p] = f"{w_in:.3f}in"
+        else:
+            sizes[p] = cv_image_width(p)
     if n:
         print()
     return sizes
@@ -381,9 +445,11 @@ def main() -> None:
     ap.add_argument("output", type=Path, nargs="?", help="Output .pdf (default: same stem as input)")
     ap.add_argument("--no-cv", action="store_false", dest="use_cv",
                     help="Disable OCR-based image sizing (faster, uses fixed max-height fallback)")
+    ap.add_argument("--no-sr", action="store_false", dest="use_sr",
+                    help="Disable super-resolution upscaling of formula images")
     args = ap.parse_args()
 
-    use_cv: bool = check_deps(args.use_cv)
+    use_cv, use_sr = check_deps(args.use_cv, args.use_sr)
 
     epub_path: Path = args.epub.resolve()
     if not epub_path.exists():
@@ -412,12 +478,19 @@ def main() -> None:
         print(f"  Chapters: {len(spine)}")
 
         cv_sizes: dict[Path, str | None] | None = None
-        if use_cv:
-            print("OCR-sizing images …")
+        if use_cv or use_sr:
             image_paths = collect_image_paths(spine)
-            print(f"  Found {len(image_paths)} unique images")
-            if image_paths:
-                cv_sizes = run_ocr(image_paths)
+            print(f"Found {len(image_paths)} unique images")
+
+            formula_originals: dict[Path, tuple[int, int]] = {}
+            if use_sr and image_paths:
+                print("Super-resolving formula images …")
+                formula_originals = upscale_formulas(image_paths)
+                print(f"  Upscaled {len(formula_originals)}/{len(image_paths)} formula images {SR_SCALE}×")
+
+            if use_cv and image_paths:
+                print("OCR-sizing images …")
+                cv_sizes = run_ocr(image_paths, formula_originals or None)
                 sized = sum(1 for v in cv_sizes.values() if v)
                 print(f"  Sized {sized}/{len(image_paths)} via OCR ({len(image_paths)-sized} fallback)")
 
