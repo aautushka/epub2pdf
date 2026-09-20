@@ -52,7 +52,7 @@ PAGE_CSS = r"""
 /* Base */
 html { font-size: 12pt; }
 body {
-  font-family: "Baskerville", "Hoefler Text", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
   line-height: 1.46;
   color: #181818;
   text-rendering: optimizeLegibility;
