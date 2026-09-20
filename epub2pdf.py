@@ -64,14 +64,15 @@ p + p { text-indent: 1.5em; margin-top: 0; margin-bottom: 0; }
 h1 + p, h2 + p, h3 + p, h4 + p,
 blockquote + p, figure + p { text-indent: 0; }
 
-/* Links */
-a { color: #1e4d9e; text-decoration: none; }
+/* Links — inherit body color so inline EPUB cross-refs don't turn text blue */
+a { color: inherit; text-decoration: none; }
 
 /* Images */
 img {
-  max-width: 100%;
-  max-height: 9in;
-  height: auto;
+  max-width: 90% !important;
+  max-height: 4in !important;
+  width: auto !important;
+  height: auto !important;
   display: block;
   margin: 1em auto;
   page-break-inside: avoid;
@@ -114,11 +115,12 @@ pre code { background: none; padding: 0; font-size: inherit; }
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.9em;
+  font-size: 0.8em;
+  line-height: 1.3;
   margin: 1em 0;
   page-break-inside: avoid;
 }
-th, td { border: 1px solid #c8c8c8; padding: 0.35em 0.65em; text-align: left; }
+th, td { border: 1px solid #c8c8c8; padding: 0.2em 0.5em; text-align: left; vertical-align: top; }
 th { background: #efefef; font-weight: 700; }
 tr:nth-child(even) td { background: #f9f9f9; }
 
@@ -240,6 +242,19 @@ def chapter_body(html_path: Path) -> str:
                 resolved = (html_path.parent / unquote(val)).resolve()
                 if resolved.exists():
                     tag[attr] = resolved.as_uri()
+
+    # Remove embedded EPUB stylesheets — our CSS takes over entirely
+    for tag in soup.find_all(["style", "link"]):
+        tag.decompose()
+
+    # Strip inline styles and size attrs that fight our CSS
+    for tag in soup.find_all(True):
+        tag.attrs.pop("style", None)
+        tag.attrs.pop("color", None)
+    for tag in soup.find_all(["table", "thead", "tbody", "tfoot", "tr", "th", "td",
+                               "img", "figure", "svg", "col", "colgroup"]):
+        tag.attrs.pop("width", None)
+        tag.attrs.pop("height", None)
 
     body = soup.find("body")
     if body:
