@@ -114,7 +114,7 @@ img {
   margin: 1.4em auto;
   page-break-inside: avoid;
 }
-img:not([style]) { max-height: 2.5in; }
+img:not([style]) { max-height: 3.5in; }
 /* Inline images within text (arrows, symbols) — don't block-ify them */
 p img { display: inline; vertical-align: middle; margin: 0 0.1em; max-height: 1.8em; }
 figure { page-break-inside: avoid; page-break-before: avoid; margin: 1.4em 0; text-align: center; }
@@ -469,20 +469,34 @@ def run_ocr(
     image_paths: list[Path],
     formula_originals: dict[Path, tuple[int, int]] | None = None,
 ) -> dict[Path, str | None]:
-    """Compute CSS widths for all images; formula images use DPI-based sizing, others use OCR."""
-    sizes: dict[Path, str | None] = {}
-    n = len(image_paths)
-    for i, p in enumerate(image_paths, 1):
-        print(f"  OCR {i}/{n}: {p.name:<40}", end="\r", flush=True)
+    """Compute CSS widths for all images in parallel (one thread per CPU core).
+    Formula images use DPI-based sizing; all others go through pytesseract OCR.
+    ThreadPoolExecutor is used because pytesseract spawns external processes,
+    releasing the GIL and making parallelism effective without pickle overhead."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _size_one(p: Path) -> tuple[Path, str | None]:
         if formula_originals and p in formula_originals:
             orig_w, orig_h = formula_originals[p]
             h_in = orig_h / FORMULA_DPI
             w_in = orig_w / FORMULA_DPI
             h_in = min(max(h_in, 0.15), 0.8)
             w_in = min(w_in * (h_in / (orig_h / FORMULA_DPI)), CONTENT_WIDTH_IN * 0.6)
-            sizes[p] = f"{w_in:.3f}in"
-        else:
-            sizes[p] = cv_image_width(p)
+            return p, f"{w_in:.3f}in"
+        return p, cv_image_width(p)
+
+    n = len(image_paths)
+    sizes: dict[Path, str | None] = {}
+    workers = min(os.cpu_count() or 4, n or 1)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_size_one, p): p for p in image_paths}
+        done = 0
+        for fut in as_completed(futures):
+            done += 1
+            print(f"  OCR {done}/{n}", end="\r", flush=True)
+            p, result = fut.result()
+            sizes[p] = result
     if n:
         print()
     return sizes
