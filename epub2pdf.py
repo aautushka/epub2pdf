@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-epub2pdf — Convert EPUB to a beautifully formatted PDF for iPad Pro.
-Usage: python epub2pdf.py input.epub [output.pdf] [--no-cv] [--no-sr]
+epub2pdf — Convert EPUB to a beautifully formatted PDF for tablet reading.
+Usage: python epub2pdf.py input.epub [output.pdf] [--device DEVICE] [--no-cv] [--no-sr]
 """
 
 import argparse
@@ -13,9 +13,28 @@ from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
 
-# ── iPad Pro 12.9" portrait dimensions ──────────────────────────────────────
+# ── Device presets ───────────────────────────────────────────────────────────
+# Each preset defines the physical page size (matching the screen) and margins.
+# "ipad-pro" targets the 12.9" iPad Pro; "ipad" covers the 10.2" iPad (9th gen)
+# and similarly-sized 10.3" Android tablets (e.g. Huawei MatePad).
+DEVICE_PRESETS: dict[str, dict] = {
+    "ipad-pro": dict(
+        page_w=7.76, page_h=10.34,
+        margin_lr=1.15, margin_top="0.82in", margin_bot="0.72in",
+    ),
+    "ipad": dict(
+        page_w=6.14, page_h=8.18,
+        margin_lr=0.70, margin_top="0.60in", margin_bot="0.52in",
+    ),
+}
+DEFAULT_DEVICE = "ipad-pro"
+
+# Active preset — overridden in main() via --device
 PAGE_WIDTH       = "7.76in"
 PAGE_HEIGHT      = "10.34in"
+MARGIN_LR        = "1.15in"
+MARGIN_TOP       = "0.82in"
+MARGIN_BOT       = "0.72in"
 CONTENT_WIDTH_IN  = 7.76 - 2 * 1.15   # usable width after margins = 5.46in
 TARGET_LABEL_PT   = 8.0               # chart/diagram labels should render at ~8pt
 SR_MAX_HEIGHT_PX  = 250               # images shorter than this are formula candidates
@@ -28,7 +47,7 @@ PAGE_CSS = r"""
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 /* Page — margins controlled by Playwright, not here */
-@page { size: 7.76in 10.34in; }
+@page { size: __PAGE_SIZE__; }
 
 /* Base */
 html { font-size: 12pt; }
@@ -610,7 +629,7 @@ def render_pdf(html_path: Path, pdf_path: Path, title: str = "") -> None:
     from playwright.sync_api import sync_playwright
 
     display_title = _clean_title(title)
-    _style = "font-family:Georgia,serif;color:#aaa;width:100%;padding:0 1.15in;"
+    _style = f"font-family:Georgia,serif;color:#aaa;width:100%;padding:0 {MARGIN_LR};"
     header = (
         f'<div style="{_style}font-size:8pt;font-style:italic;text-align:center;">'
         f'{display_title}</div>'
@@ -632,20 +651,36 @@ def render_pdf(html_path: Path, pdf_path: Path, title: str = "") -> None:
             display_header_footer=True,
             header_template=header,
             footer_template=footer,
-            margin={"top": "0.82in", "right": "1.15in", "bottom": "0.72in", "left": "1.15in"},
+            margin={"top": MARGIN_TOP, "right": MARGIN_LR, "bottom": MARGIN_BOT, "left": MARGIN_LR},
         )
         browser.close()
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Convert EPUB to PDF for iPad Pro.")
+    ap = argparse.ArgumentParser(description="Convert EPUB to PDF for tablet reading.")
     ap.add_argument("epub",   type=Path, help="Input .epub file")
     ap.add_argument("output", type=Path, nargs="?", help="Output .pdf (default: same stem as input)")
+    ap.add_argument("--device", default=DEFAULT_DEVICE,
+                    choices=list(DEVICE_PRESETS),
+                    help=f"Target device preset (default: {DEFAULT_DEVICE})")
     ap.add_argument("--no-cv", action="store_false", dest="use_cv",
                     help="Disable OCR-based image sizing (faster, uses fixed max-height fallback)")
     ap.add_argument("--no-sr", action="store_false", dest="use_sr",
                     help="Disable super-resolution upscaling of formula images")
     args = ap.parse_args()
+
+    # Apply device preset — update module globals so all functions see the right values
+    preset = DEVICE_PRESETS[args.device]
+    g = globals()
+    g["PAGE_WIDTH"]       = f"{preset['page_w']}in"
+    g["PAGE_HEIGHT"]      = f"{preset['page_h']}in"
+    g["MARGIN_LR"]        = f"{preset['margin_lr']}in"
+    g["MARGIN_TOP"]       = preset["margin_top"]
+    g["MARGIN_BOT"]       = preset["margin_bot"]
+    g["CONTENT_WIDTH_IN"] = preset["page_w"] - 2 * preset["margin_lr"]
+    g["PAGE_CSS"]         = PAGE_CSS.replace("__PAGE_SIZE__",
+                                f"{g['PAGE_WIDTH']} {g['PAGE_HEIGHT']}")
+    print(f"Device      : {args.device}  ({g['PAGE_WIDTH']} × {g['PAGE_HEIGHT']})")
 
     use_cv, use_sr = check_deps(args.use_cv, args.use_sr)
 
