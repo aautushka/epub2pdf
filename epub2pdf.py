@@ -16,7 +16,7 @@ from xml.etree import ElementTree as ET
 # ── iPad Pro 12.9" portrait dimensions ──────────────────────────────────────
 PAGE_WIDTH       = "7.76in"
 PAGE_HEIGHT      = "10.34in"
-CONTENT_WIDTH_IN  = 7.76 - 2 * 0.70   # usable width after margins = 6.36in
+CONTENT_WIDTH_IN  = 7.76 - 2 * 0.90   # usable width after margins = 5.96in
 TARGET_LABEL_PT   = 8.0               # chart/diagram labels should render at ~8pt
 SR_MAX_HEIGHT_PX  = 250               # images shorter than this are formula candidates
 SR_MAX_SAT_STD    = 0.05              # saturation std below this → near-grayscale
@@ -27,17 +27,14 @@ PAGE_CSS = r"""
 /* Reset */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* Page */
-@page {
-  size: 7.76in 10.34in;
-  margin: 0.72in 0.70in;
-}
+/* Page — margins controlled by Playwright, not here */
+@page { size: 7.76in 10.34in; }
 
 /* Base */
-html { font-size: 11pt; }
+html { font-size: 10.5pt; }
 body {
-  font-family: Georgia, "Palatino Linotype", "Book Antiqua", serif;
-  line-height: 1.62;
+  font-family: "Baskerville", "Hoefler Text", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  line-height: 1.38;
   color: #181818;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -47,30 +44,56 @@ body {
 
 /* Headings */
 h1, h2, h3, h4, h5, h6 {
-  font-family: Georgia, serif;
   color: #111;
-  line-height: 1.25;
-  margin: 1.4em 0 0.45em;
   page-break-after: avoid;
   page-break-inside: avoid;
 }
 h1 {
-  font-size: 1.85em;
-  padding-bottom: 0.18em;
-  border-bottom: 1.5px solid #ccc;
+  font-size: 1.6em;
+  font-weight: normal;
+  text-align: center;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  margin: 2.2em 0 1.8em;
+  padding-bottom: 0.5em;
+  border-bottom: 0.75pt solid #bbb;
 }
-h2 { font-size: 1.35em; }
-h3 { font-size: 1.12em; }
-h4 { font-size: 1em; font-style: italic; }
-h5, h6 { font-size: 0.95em; font-weight: bold; }
+h2 {
+  font-size: 1em;
+  font-weight: normal;
+  font-variant: small-caps;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  margin: 2em 0 0.5em;
+}
+h3 {
+  font-size: 1em;
+  font-weight: normal;
+  font-style: italic;
+  line-height: 1.3;
+  margin: 1.6em 0 0.4em;
+}
+h4 { font-size: 1em; font-weight: bold; margin: 1.2em 0 0.3em; }
+h5, h6 { font-size: 0.95em; font-style: italic; margin: 1em 0 0.3em; }
 
-/* Paragraphs */
-p { margin-bottom: 0.55em; text-align: justify; hyphens: auto; }
-p + p { text-indent: 1.5em; margin-top: 0; margin-bottom: 0; }
-h1 + p, h2 + p, h3 + p, h4 + p,
-blockquote + p, figure + p { text-indent: 0; }
+/* Paragraphs — indent only, zero inter-paragraph space */
+p { margin: 0; text-align: justify; hyphens: auto; }
+p + p { text-indent: 1.4em; }
+h1 + p, h2 + p, h3 + p, h4 + p, h5 + p, h6 + p,
+blockquote + p, figure + p, ul + p, ol + p,
+div.chapter > p:first-child { text-indent: 0; }
 
-/* Links — inherit body color so inline EPUB cross-refs don't turn text blue */
+/* Drop cap on opening paragraph of each chapter */
+div.chapter > p:first-child::first-letter {
+  float: left;
+  font-size: 3.1em;
+  line-height: 0.82;
+  margin: 0.06em 0.08em 0 0;
+  font-family: "Baskerville", "Hoefler Text", Georgia, serif;
+}
+
+/* Links */
 a { color: inherit; text-decoration: none; }
 
 /* Images */
@@ -78,68 +101,77 @@ img {
   max-width: 100%;
   height: auto;
   display: block;
-  margin: 1em auto;
+  margin: 1.4em auto;
   page-break-inside: avoid;
 }
-/* Fallback cap for images not sized by CV */
 img:not([style]) { max-height: 4in; }
-figure { page-break-inside: avoid; margin: 1.2em 0; text-align: center; }
-figcaption { font-size: 0.84em; color: #555; font-style: italic; margin-top: 0.3em; }
+figure { page-break-inside: avoid; margin: 1.4em 0; text-align: center; }
+figcaption {
+  font-size: 0.82em;
+  color: #444;
+  margin-top: 0.5em;
+  text-align: center;
+  font-style: normal;
+}
 
 /* Blockquote */
 blockquote {
-  margin: 1em 1.6em;
-  padding: 0.4em 1em;
-  border-left: 3px solid #bbb;
-  color: #444;
+  margin: 1em 1.8em;
+  font-size: 0.96em;
   font-style: italic;
+  color: #333;
 }
 
 /* Code */
 code, kbd, samp {
   font-family: "Menlo", "Courier New", monospace;
-  font-size: 0.87em;
-  background: #f4f4f4;
-  padding: 0.05em 0.25em;
-  border-radius: 2px;
+  font-size: 0.84em;
 }
 pre {
   font-family: "Menlo", "Courier New", monospace;
-  font-size: 0.84em;
-  background: #f5f5f5;
-  border: 1px solid #ddd;
+  font-size: 0.82em;
+  background: #f7f7f7;
+  border-left: 2pt solid #ccc;
   padding: 0.8em 1em;
-  border-radius: 3px;
   page-break-inside: avoid;
-  margin: 1em 0;
+  margin: 1.2em 0;
   white-space: pre-wrap;
   word-break: break-all;
 }
-pre code { background: none; padding: 0; font-size: inherit; }
+pre code { font-size: inherit; }
 
-/* Tables */
+/* Tables — booktabs style: horizontal rules only, no grid */
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8em;
+  font-size: 0.82em;
   line-height: 1.3;
-  margin: 1em 0;
+  margin: 1.5em 0;
   page-break-inside: avoid;
 }
-th, td { border: 1px solid #c8c8c8; padding: 0.2em 0.5em; text-align: left; vertical-align: top; }
-th { background: #efefef; font-weight: 700; }
-tr:nth-child(even) td { background: #f9f9f9; }
+thead tr:first-child th { border-top: 1.5pt solid #222; }
+thead tr:last-child  th { border-bottom: 0.75pt solid #555; }
+tbody tr:last-child  td { border-bottom: 1.5pt solid #222; }
+th, td { padding: 0.28em 0.7em; text-align: left; vertical-align: top; border: none; }
+th { font-weight: normal; font-variant: small-caps; letter-spacing: 0.04em; }
 
 /* Lists */
-ul, ol { margin: 0.5em 0 0.6em 1.9em; }
-li { margin-bottom: 0.2em; }
-li p { text-indent: 0; }
+ul, ol { margin: 0.6em 0 0.6em 1.8em; }
+li { margin-bottom: 0.15em; }
+li p { text-indent: 0; margin: 0; }
 
-/* Horizontal rule */
-hr { border: none; border-top: 1px solid #ccc; margin: 1.4em 0; }
+/* Horizontal rule → ornamental section break */
+hr { border: none; margin: 1.8em 0; text-align: center; }
+hr::after { content: "✦"; color: #bbb; font-size: 0.85em; letter-spacing: 0.4em; }
 
 /* Footnotes */
-.footnote, .footnotes { font-size: 0.85em; color: #555; border-top: 1px solid #ddd; margin-top: 1.5em; padding-top: 0.5em; }
+.footnote, .footnotes {
+  font-size: 0.83em;
+  color: #555;
+  border-top: 0.5pt solid #ccc;
+  margin-top: 2em;
+  padding-top: 0.6em;
+}
 """
 
 HTML_TEMPLATE = """\
@@ -421,8 +453,18 @@ def chapter_body(html_path: Path, cv_sizes: dict[Path, str | None] | None = None
     return f'<div class="chapter">\n{str(soup)}\n</div>'
 
 
-def render_pdf(html_path: Path, pdf_path: Path) -> None:
+def render_pdf(html_path: Path, pdf_path: Path, title: str = "") -> None:
     from playwright.sync_api import sync_playwright
+
+    _style = "font-family:Georgia,serif;color:#aaa;width:100%;padding:0 0.90in;"
+    header = (
+        f'<div style="{_style}font-size:8pt;text-align:center;letter-spacing:0.07em;">'
+        f'{title}</div>'
+    )
+    footer = (
+        f'<div style="{_style}font-size:9pt;text-align:center;">'
+        '<span class="pageNumber"></span></div>'
+    )
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -433,8 +475,10 @@ def render_pdf(html_path: Path, pdf_path: Path) -> None:
             width=PAGE_WIDTH,
             height=PAGE_HEIGHT,
             print_background=True,
-            display_header_footer=False,
-            margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
+            display_header_footer=True,
+            header_template=header,
+            footer_template=footer,
+            margin={"top": "0.82in", "right": "0.90in", "bottom": "0.72in", "left": "0.90in"},
         )
         browser.close()
 
@@ -507,7 +551,7 @@ def main() -> None:
         html_file.write_text(html, encoding="utf-8")
 
         print("Rendering PDF via Chromium …")
-        render_pdf(html_file, pdf_path)
+        render_pdf(html_file, pdf_path, title=meta.get("title", epub_path.stem))
 
     print(f"\nDone → {pdf_path}")
 
